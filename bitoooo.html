@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
+<title>JxMx — Universo Final</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { height:100%; margin:0; background:#000; overflow:hidden; -webkit-tap-highlight-color: transparent; font-family: Inter, system-ui, Arial; }
+  canvas { display:block; width:100vw; height:100vh; touch-action: none; }
+  /* Enter button */
+  #enterBtn {
+    position: fixed; left:50%; top:50%; transform: translate(-50%,-50%);
+    z-index:40;
+    background: linear-gradient(135deg, rgba(50,120,255,0.12), rgba(180,60,255,0.12));
+    border: 1px solid rgba(255,255,255,0.06);
+    color: #eaffff; padding:14px 22px; font-size:18px; border-radius:18px;
+    backdrop-filter: blur(6px) saturate(120%); box-shadow: 0 10px 30px rgba(30,10,70,0.32);
+  }
+  #enterHint {
+    position: fixed; left:50%; top:62%; transform: translateX(-50%);
+    color: rgba(230,230,255,0.78); font-size:12px; z-index:40;
+  }
+  #uiBar {
+    position: fixed; left:8px; right:8px; bottom:12px; display:flex; justify-content:space-between;
+    gap:8px; align-items:center; z-index:40;
+  }
+  .control { background: rgba(255,255,255,0.03); color:#eaffff; padding:8px 12px; border-radius:12px; font-size:13px; backdrop-filter: blur(6px); border:1px solid rgba(255,255,255,0.03); }
+  /* small helper when drawing words as DOM is disabled for perf */
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<button id="enterBtn">✨ Entrar al universo JxMx ✨</button>
+<div id="enterHint">Toca para iniciar la música y la experiencia (necesario en móviles)</div>
+
+<div id="uiBar" style="display:none">
+  <div id="muteBtn" class="control">🔊 Volumen</div>
+  <div class="control">Arrastra = mover • Pellizca = zoom • Toca palabras para agrandar</div>
+</div>
+
+<script>
+/* ========== CONFIG & CANVAS ========== */
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+const DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+let W = canvas.width = Math.floor(innerWidth * DPR);
+let H = canvas.height = Math.floor(innerHeight * DPR);
+canvas.style.width = innerWidth + 'px';
+canvas.style.height = innerHeight + 'px';
+ctx.scale(DPR, DPR);
+
+/* UI */
+const enterBtn = document.getElementById('enterBtn');
+const enterHint = document.getElementById('enterHint');
+const uiBar = document.getElementById('uiBar');
+const muteBtn = document.getElementById('muteBtn');
+
+/* Performance tuning */
+const TARGET_FPS = 60;
+let lastFrameTime = 0;
+
+/* ========== SCENE DATA ========== */
+/* Planets (fixed positions, spin only) */
+const planets = [
+  { id: 'jupiter', name: 'Júpiter', x: innerWidth*0.22, y: innerHeight*0.45, r: 66, color: '#d9a066', hasRing:false },
+  { id: 'tierra',  name: 'Tierra',  x: innerWidth*0.52, y: innerHeight*0.58, r: 56, color: '#3a7bd5', hasRing:false },
+  { id: 'saturno', name: 'Saturno', x: innerWidth*0.78, y: innerHeight*0.36, r: 62, color: '#cdb591', hasRing:true }
+];
+
+const WORD_POOL = ['bitolino','tesoro','amor','8','te amo','te extraño','mi bello bito'];
+const WORDS_PER_PLANET = 20;
+
+/* prepare words (canvas-managed for perf) */
+planets.forEach((p) => {
+  p.words = [];
+  p.rotation = Math.random() * Math.PI * 2;           // spin angle
+  p.spinSpeed = 0.003 + Math.random()*0.006;          // spin speed
+  const orbits = [p.r + 22, p.r + 38, p.r + 56];     // radial distances for words
+  for (let i=0; i<WORDS_PER_PLANET; i++){
+    p.words.push({
+      text: WORD_POOL[i % WORD_POOL.length],
+      angle: Math.random() * Math.PI * 2,
+      radius: orbits[i % orbits.length],
+      speed: 0.004 + Math.random() * 0.008,
+      scale: 1,
+      targetScale: 1,
+      pulse: 0
+    });
+  }
+});
+
+/* Comets (3 realistic) */
+const comets = [
+  { x: -120, y: innerHeight*0.14, vx: 3.2, vy: 0.28, len: 160, parts: 10 },
+  { x: -60,  y: innerHeight*0.26, vx: 2.6, vy: 0.18, len: 120, parts: 9  },
+  { x: -200, y: innerHeight*0.06, vx: 4.0, vy: 0.36, len: 200, parts: 12 }
+];
+
+/* Nebula + stars */
+const stars = [];
+for(let i=0;i<120;i++){
+  stars.push({
+    x: Math.random()*innerWidth,
+    y: Math.random()*innerHeight,
+    r: Math.random()*1.6 + 0.4,
+    phase: Math.random()*Math.PI*2,
+    base: Math.random()*0.7 + 0.3
+  });
+}
+const nebulas = [];
+for(let i=0;i<3;i++){
+  nebulas.push({
+    x: Math.random()*innerWidth,
+    y: Math.random()*innerHeight,
+    r: Math.random()* (innerWidth*0.22) + innerWidth*0.12,
+    hue: 200 + Math.random()*140,
+    opacity: 0.06 + Math.random()*0.08,
+    drift: (Math.random()-0.5)*0.02
+  });
+}
+
+/* View transform (pan/zoom) */
+let view = { tx:0, ty:0, scale:1 };
+let isPanning = false, lastPan = null;
+let pinch = { active:false, startDist:0, startScale:1, mid:{x:0,y:0} };
+
+/* small helper */
+function rand(min,max){ return min + Math.random()*(max-min); }
+
+/* ========== AUDIO - "Cosmic Drift - Deep Version" (procedural WebAudio) ========== */
+let audioStarted = false;
+let audioCtx = null;
+let masterGain = null;
+let audioNodes = null;
+
+function startAudio() {
+  if (audioStarted) return;
+  audioStarted = true;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = 0.5;
+  masterGain.connect(audioCtx.destination);
+
+  // Ambient pad: several detuned oscillators lowpass -> gentle LFO
+  const pad1 = audioCtx.createOscillator(); pad1.type = 'sine'; pad1.frequency.value = 40;
+  const pad2 = audioCtx.createOscillator(); pad2.type = 'sine'; pad2.frequency.value = 55;
+  const pad3 = audioCtx.createOscillator(); pad3.type = 'sine'; pad3.frequency.value = 82;
+
+  const padG1 = audioCtx.createGain(); padG1.gain.value = 0.06;
+  const padG2 = audioCtx.createGain(); padG2.gain.value = 0.05;
+  const padG3 = audioCtx.createGain(); padG3.gain.value = 0.04;
+
+  const filter = audioCtx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 900;
+  // gentle LFO modulating filter cutoff
+  const lfo = audioCtx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 0.07;
+  const lfoGain = audioCtx.createGain(); lfoGain.gain.value = 500;
+  lfo.connect(lfoGain); lfoGain.connect(filter.frequency);
+
+  pad1.connect(padG1); pad2.connect(padG2); pad3.connect(padG3);
+  padG1.connect(filter); padG2.connect(filter); padG3.connect(filter);
+  filter.connect(masterGain);
+
+  pad1.start(); pad2.start(); pad3.start(); lfo.start();
+
+  // soft rhythmic pulses (subtle) using filtered noise bursts
+  function softPulse() {
+    const noiseBuf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.12, audioCtx.sampleRate);
+    const data = noiseBuf.getChannelData(0);
+    for (let i=0;i<data.length;i++) data[i] = (Math.random()*2 - 1) * 0.2;
+    const src = audioCtx.createBufferSource(); src.buffer = noiseBuf;
+    const noiseGain = audioCtx.createGain(); noiseGain.gain.value = 0.0;
+    const band = audioCtx.createBiquadFilter(); band.type='bandpass'; band.frequency.value = 800;
+    src.connect(noiseGain); noiseGain.connect(band); band.connect(masterGain);
+    noiseGain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    noiseGain.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime + 0.02);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.32);
+    src.start();
+    setTimeout(()=>{ try{ src.stop(); }catch(e){} }, 500);
+  }
+  // schedule periodic soft pulses with slight randomness
+  let pulseTimer = setInterval(()=>{ softPulse(); }, 1200 + Math.random()*700 );
+
+  // store nodes for control
+  audioNodes = { pad1, pad2, pad3, lfo, filter, pulseTimer };
+}
+
+/* mute toggle */
+muteBtn.addEventListener('click', ()=>{
+  if (!audioStarted || !audioNodes) return;
+  if (masterGain && masterGain.gain.value > 0.01) { masterGain.gain.value = 0; muteBtn.textContent = '🔈 Silenciado'; }
+  else { masterGain.gain.value = 0.5; muteBtn.textContent = '🔊 Volumen'; }
+});
+
+/* ========== DRAW HELPERS ========== */
+function clear() {
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.fillStyle = '#000012';
+  ctx.fillRect(0,0,innerWidth,innerHeight);
+  // apply view transform
+  ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+}
+
+/* background: nebulas + stars */
+function drawBackground() {
+  // nebulas
+  nebulas.forEach(n=>{
+    ctx.save();
+    ctx.globalAlpha = n.opacity;
+    const g = ctx.createRadialGradient(n.x, n.y, 10, n.x, n.y, n.r);
+    g.addColorStop(0, `hsla(${n.hue},80%,64%,1)`);
+    g.addColorStop(0.4, `hsla(${n.hue},70%,42%,0.22)`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, n.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    // drift
+    n.x += n.drift * 0.3;
+    if (n.x < -n.r) n.x = innerWidth + n.r;
+    if (n.x > innerWidth + n.r) n.x = -n.r;
+  });
+
+  // stars
+  stars.forEach(s=>{
+    const alpha = s.base * (0.6 + 0.4 * Math.sin(performance.now()/900 + s.phase));
+    ctx.fillStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill();
+  });
+}
+
+/* draw realistic-looking planet with bands/texture */
+function drawPlanet(p){
+  ctx.save();
+  // subtle glow behind
+  ctx.beginPath();
+  const glowGrad = ctx.createRadialGradient(p.x, p.y, p.r*0.5, p.x, p.y, p.r*2.6);
+  glowGrad.addColorStop(0, 'rgba(255,255,255,0.02)');
+  glowGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glowGrad;
+  ctx.arc(p.x, p.y, p.r*2.6, 0, Math.PI*2); ctx.fill();
+
+  // rotate for bands
+  ctx.translate(p.x, p.y);
+  ctx.rotate(p.rotation);
+  // base radial gradient
+  const grad = ctx.createRadialGradient(-p.r*0.2, -p.r*0.2, p.r*0.12, 0, 0, p.r);
+  grad.addColorStop(0, '#fff');
+  grad.addColorStop(0.25, p.color);
+  grad.addColorStop(1, '#081018');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(0,0,p.r,0,Math.PI*2); ctx.fill();
+
+  // textured bands: layered translucent strokes
+  for(let i=0;i<5;i++){
+    ctx.beginPath();
+    const alpha = 0.055 + i*0.02;
+    ctx.strokeStyle = `rgba(0,0,0,${alpha})`;
+    ctx.lineWidth = 6 + i*1.3;
+    ctx.arc(0, 0, p.r - (i*3.5), 0.2 + i*0.06, Math.PI*1.8 - i*0.06);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+
+  // ring for Saturn (draw outside rotated space)
+  if (p.hasRing){
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(0.42);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, p.r*2.1, p.r*0.55, 0, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(220,200,160,0.36)';
+    ctx.lineWidth = Math.max(2, p.r*0.06);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+/* draw words (canvas text) */
+function drawWordsForPlanet(p){
+  // font scales with view to remain legible
+  const baseFont = Math.max(12, Math.round(14 * (1 / view.scale)));
+  ctx.save();
+  ctx.font = `${baseFont}px system-ui, Arial`;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  p.words.forEach(w=>{
+    const angle = w.angle + p.rotation * 0.6;
+    const x = p.x + Math.cos(angle) * w.radius;
+    const y = p.y + Math.sin(angle) * w.radius;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(w.scale, w.scale);
+    ctx.fillStyle = '#ff6fae';
+    ctx.shadowColor = 'rgba(255,110,175,0.95)';
+    ctx.shadowBlur = 10;
+    ctx.fillText(w.text, 0, 0);
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+/* draw comet with tail particles */
+function drawComet(c){
+  // tail strokes
+  for(let i=0;i<c.parts;i++){
+    const alpha = 0.9 * (1 - i / c.parts);
+    const dx = c.x - i * (c.len / c.parts);
+    const dy = c.y - i * (c.len / (c.parts*4));
+    ctx.beginPath();
+    ctx.strokeStyle = `rgba(220,235,255,${alpha*0.6})`;
+    ctx.lineWidth = Math.max(1.2, 3 - i*0.18);
+    ctx.moveTo(c.x - i*2, c.y - i*0.6);
+    ctx.lineTo(dx, dy);
+    ctx.stroke();
+  }
+  // head
+  ctx.beginPath();
+  ctx.fillStyle = 'rgba(255,255,255,0.96)';
+  ctx.arc(c.x, c.y, 2.6, 0, Math.PI*2);
+  ctx.fill();
+}
+
+/* ========== ANIMATION LOOP ========== */
+let running = false;
+function loop(ts){
+  requestAnimationFrame(loop);
+  // throttle by frame time for stable mobile perf
+  if (!lastFrameTime) lastFrameTime = ts;
+  const delta = ts - lastFrameTime;
+  const minInterval = 1000 / TARGET_FPS;
+  if (delta < minInterval) return;
+  lastFrameTime = ts;
+
+  clear();
+  drawBackground();
+
+  // update & draw comets
+  for (let i=0;i<comets.length;i++){
+    const c = comets[i];
+    drawComet(c);
+    c.x += c.vx; c.y += c.vy;
+    // subtle wobble
+    c.x += Math.sin((ts/1000)+i) * 0.1;
+    // recycle when offscreen
+    if (c.x > innerWidth + 220 || c.y > innerHeight + 220){
+      comets[i] = { x: -rand(120,60), y: rand(-40, innerHeight*0.45), vx: rand(2.2,4.2), vy: rand(0.08,0.5), len: rand(100,220), parts: Math.floor(rand(8,14)) };
+    }
+  }
+
+  // planets: spin (no translation)
+  planets.forEach(p=>{
+    p.rotation += p.spinSpeed;
+    drawPlanet(p);
+  });
+
+  // update words angles and draw
+  planets.forEach(p=>{
+    p.words.forEach(w=>{
+      w.angle += w.speed;
+      // easing zoom
+      if (Math.abs(w.targetScale - w.scale) > 0.02) w.scale += (w.targetScale - w.scale) * 0.18;
+      else w.scale = w.targetScale;
+    });
+    drawWordsForPlanet(p);
+  });
+}
+
+/* ========== INTERACTION: PAN / PINCH / TAP ========== */
+function worldFromScreen(sx, sy){
+  return { x: (sx - view.tx) / view.scale, y: (sy - view.ty) / view.scale };
+}
+
+/* detect nearest word within threshold */
+function detectWordAtScreen(sx, sy){
+  const wpos = worldFromScreen(sx, sy);
+  let best = null; let bestD = 9999;
+  planets.forEach(p=>{
+    p.words.forEach(w=>{
+      const angle = w.angle + p.rotation*0.6;
+      const wx = p.x + Math.cos(angle) * w.radius;
+      const wy = p.y + Math.sin(angle) * w.radius;
+      const dx = wx - wpos.x, dy = wy - wpos.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      if (d < bestD){ bestD = d; best = {planet:p, word:w, wx, wy, d}; }
+    });
+  });
+  // threshold scales with view to be touch-friendly
+  if (best && best.d < 30 / view.scale) return best;
+  return null;
+}
+
+/* touch handlers */
+let started = false;
+canvas.addEventListener('touchstart', (ev) => {
+  ev.preventDefault();
+  if (!started) return;
+  // single or multi
+  if (ev.touches.length === 1){
+    isPanning = true;
+    lastPan = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+    // short tap detection - handled on touchend
+  } else if (ev.touches.length === 2){
+    pinch.active = true;
+    const a = ev.touches[0], b = ev.touches[1];
+    pinch.startDist = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+    pinch.startScale = view.scale;
+    pinch.mid = { x: (a.clientX + b.clientX)/2, y: (a.clientY + b.clientY)/2 };
+  }
+}, { passive:false });
+
+canvas.addEventListener('touchmove', (ev) => {
+  ev.preventDefault();
+  if (!started) return;
+  if (pinch.active && ev.touches.length === 2){
+    const a = ev.touches[0], b = ev.touches[1];
+    const curDist = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+    const factor = curDist / pinch.startDist;
+    const mid = { x: (a.clientX + b.clientX)/2, y: (a.clientY + b.clientY)/2 };
+    const before = worldFromScreen(mid.x, mid.y);
+    view.scale = Math.max(0.6, Math.min(3.0, pinch.startScale * factor));
+    const after = worldFromScreen(mid.x, mid.y);
+    // adjust pan so mid point stays stable
+    view.tx += (after.x - before.x) * view.scale;
+    view.ty += (after.y - before.y) * view.scale;
+  } else if (isPanning && ev.touches.length === 1){
+    const t = ev.touches[0];
+    const dx = t.clientX - lastPan.x;
+    const dy = t.clientY - lastPan.y;
+    lastPan = { x: t.clientX, y: t.clientY };
+    view.tx += dx;
+    view.ty += dy;
+  }
+}, { passive:false });
+
+canvas.addEventListener('touchend', (ev) => {
+  ev.preventDefault();
+  if (!started) return;
+  if (ev.touches.length === 0){
+    // end gestures
+    isPanning = false; pinch.active = false; lastPan = null;
+    // treat as tap if quick: use remaining changedTouches if any
+    // use last touch end position to detect word point
+    // we check changedTouches
+    if (ev.changedTouches && ev.changedTouches.length > 0){
+      const t = ev.changedTouches[0];
+      const hit = detectWordAtScreen(t.clientX, t.clientY);
+      if (hit){
+        hit.word.targetScale = (hit.word.targetScale > 1.05) ? 1 : 2.2;
+        hit.word.pulse = 1.2;
+      }
+    }
+  } else if (ev.touches.length === 1){
+    // move back to single touch
+    pinch.active = false;
+    lastPan = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
+  }
+});
+
+/* mouse fallback (desktop debug) */
+let md = false;
+canvas.addEventListener('mousedown', e => { md = true; lastPan = {x:e.clientX,y:e.clientY}; });
+canvas.addEventListener('mousemove', e => { if (md){ view.tx += e.clientX - lastPan.x; view.ty += e.clientY - lastPan.y; lastPan = {x:e.clientX,y:e.clientY}; }});
+canvas.addEventListener('mouseup', ()=> md=false);
+canvas.addEventListener('click', e => {
+  if (!started) return;
+  const hit = detectWordAtScreen(e.clientX, e.clientY);
+  if (hit) { hit.word.targetScale = (hit.word.targetScale > 1.05) ? 1 : 2.2; hit.word.pulse = 1.2; }
+});
+
+/* ========== ENTER BUTTON START ========== */
+enterBtn.addEventListener('click', () => {
+  if (started) return;
+  started = true;
+  enterBtn.style.display = 'none';
+  enterHint.style.display = 'none';
+  uiBar.style.display = 'flex';
+  // start audio
+  startAudio();
+  // begin loop
+  requestAnimationFrame(loop);
+});
+
+/* initial static preview before pressing enter */
+(function previewFrame(){
+  clear();
+  drawBackground();
+  planets.forEach(p => { drawPlanet(p); });
+  planets.forEach(p => drawWordsForPlanet(p));
+})();
+
+/* handle resizing */
+window.addEventListener('resize', () => {
+  const newDPR = Math.min(window.devicePixelRatio || 1, 1.5);
+  W = canvas.width = Math.floor(window.innerWidth * newDPR);
+  H = canvas.height = Math.floor(window.innerHeight * newDPR);
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.scale(newDPR, newDPR);
+  // reposition planets proportionally
+  planets[0].x = innerWidth*0.22; planets[0].y = innerHeight*0.45;
+  planets[1].x = innerWidth*0.52; planets[1].y = innerHeight*0.58;
+  planets[2].x = innerWidth*0.78; planets[2].y = innerHeight*0.36;
+});
+
+/* kick animation loop */
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
